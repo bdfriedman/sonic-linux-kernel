@@ -237,6 +237,17 @@ cisco-npu-disable-other-bars.patch
 # https://github.com/sonic-net/sonic-buildimage/issues/20901
 PCI-ASPM-Fix-link-state-exit-during-switch-upstream.patch
 
+# Backport patches (prerequisites for EVPN MH)
+0001-bridge-Add-MAC-Authentication-Bypass-MAB-support.patch
+0002-bridge-switchdev-Allow-locked-FDB-entries.patch
+0003-net-bridge-Set-BR_FDB_ADDED_BY_USER-early.patch
+0004-net-bridge-Track-and-limit-dynamically-learned-FDB.patch
+
+# EVPN MH patches (order matters: vxlan adds NTF_EXT_MH_PEER_SYNC, neighbor depends on it)
+0005-vxlan-bridge-Add-NDA_FLAGS_EXT-support-with-NTF_EXT_.patch
+0006-net-bridge-vxlan-Protocol-field-in-bridge-fdb.patch
+0007-neighbor-Add-NTF_EXT_VALIDATED-flag-for-externally-v.patch
+
 #
 #
 ############################################################

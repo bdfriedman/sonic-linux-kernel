@@ -1,0 +1,45 @@
+From 1d58050e84b376e61eee40007e60d08e5773d094 Mon Sep 17 00:00:00 2001
+From: Johannes Nixdorf <jnixdorf-oss@avm.de>
+Date: Tue, 17 Feb 2026 16:07:50 -0800
+Subject: [PATCH] net: bridge: Set BR_FDB_ADDED_BY_USER early in fdb_add_entry
+
+Signed-off-by: Tamer Ahmed <tamerahmed@microsoft.com>
+---
+ net/bridge/br_fdb.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/net/bridge/br_fdb.c b/net/bridge/br_fdb.c
+index a6d8cd9a5..91903076d 100644
+--- a/net/bridge/br_fdb.c
++++ b/net/bridge/br_fdb.c
+@@ -1056,7 +1056,8 @@ static int fdb_add_entry(struct net_bridge *br, struct net_bridge_port *source,
+ 		if (!(flags & NLM_F_CREATE))
+ 			return -ENOENT;
+ 
+-		fdb = fdb_create(br, source, addr, vid, 0);
++		fdb = fdb_create(br, source, addr, vid,
++				 BIT(BR_FDB_ADDED_BY_USER));
+ 		if (!fdb)
+ 			return -ENOMEM;
+ 
+@@ -1069,6 +1070,8 @@ static int fdb_add_entry(struct net_bridge *br, struct net_bridge_port *source,
+ 			WRITE_ONCE(fdb->dst, source);
+ 			modified = true;
+ 		}
++
++		set_bit(BR_FDB_ADDED_BY_USER, &fdb->flags);
+ 	}
+ 
+ 	if (fdb_to_nud(br, fdb) != state) {
+@@ -1100,8 +1103,6 @@ static int fdb_add_entry(struct net_bridge *br, struct net_bridge_port *source,
+ 	if (fdb_handle_notify(fdb, notify))
+ 		modified = true;
+ 
+-	set_bit(BR_FDB_ADDED_BY_USER, &fdb->flags);
+-
+ 	fdb->used = jiffies;
+ 	if (modified) {
+ 		if (refresh)
+-- 
+2.43.0
+

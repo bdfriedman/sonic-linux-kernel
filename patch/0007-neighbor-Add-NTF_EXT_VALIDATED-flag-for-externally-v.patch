@@ -1,0 +1,222 @@
+From cf9497b8eaaa6efe3b5865f958d26db5b85a9ac5 Mon Sep 17 00:00:00 2001
+From: "Barry Friedman (friedman)" <friedman@cisco.com>
+Date: Tue, 17 Feb 2026 16:26:08 -0800
+Subject: [PATCH 3/3] neighbor: Add NTF_EXT_VALIDATED flag for externally
+ validated entries
+
+Signed-off-by: Tamer Ahmed <tamerahmed@microsoft.com>
+---
+ include/net/neighbour.h        |  4 +-
+ include/uapi/linux/neighbour.h |  5 +++
+ net/core/neighbour.c           | 67 +++++++++++++++++++++++++++++-----
+ 3 files changed, 66 insertions(+), 10 deletions(-)
+
+diff --git a/include/net/neighbour.h b/include/net/neighbour.h
+index cf0bd13ab..5aa59eb79 100644
+--- a/include/net/neighbour.h
++++ b/include/net/neighbour.h
+@@ -267,14 +267,16 @@ static inline void *neighbour_priv(const struct neighbour *n)
+ #define NEIGH_UPDATE_F_ISROUTER			BIT(6)
+ #define NEIGH_UPDATE_F_ADMIN			BIT(7)
+ #define NEIGH_UPDATE_F_EXT_MH_PEER_SYNC	BIT(8)
++#define NEIGH_UPDATE_F_EXT_VALIDATED	BIT(9)
+ 
+ /* In-kernel representation for NDA_FLAGS_EXT flags: */
+ #define NTF_OLD_MASK		0xff
+ #define NTF_EXT_SHIFT		8
+-#define NTF_EXT_MASK		(NTF_EXT_MANAGED | NTF_EXT_MH_PEER_SYNC)
++#define NTF_EXT_MASK		(NTF_EXT_MANAGED | NTF_EXT_MH_PEER_SYNC | NTF_EXT_EXT_VALIDATED)
+ 
+ #define NTF_MANAGED		(NTF_EXT_MANAGED << NTF_EXT_SHIFT)
+ #define NTF_MH_PEER_SYNC	(NTF_EXT_MH_PEER_SYNC << NTF_EXT_SHIFT)
++#define NTF_EXT_VALIDATED	(NTF_EXT_EXT_VALIDATED << NTF_EXT_SHIFT)
+ 
+ extern const struct nla_policy nda_policy[];
+ 
+diff --git a/include/uapi/linux/neighbour.h b/include/uapi/linux/neighbour.h
+index cbd1fe817..827a5f43d 100644
+--- a/include/uapi/linux/neighbour.h
++++ b/include/uapi/linux/neighbour.h
+@@ -55,6 +55,7 @@ enum {
+ #define NTF_EXT_MANAGED		(1 << 0)
+ #define NTF_EXT_LOCKED		(1 << 1)
+ #define NTF_EXT_MH_PEER_SYNC	(1 << 2)
++#define NTF_EXT_EXT_VALIDATED	(1 << 3)
+ 
+ /*
+  *	Neighbor Cache Entry States.
+@@ -93,6 +94,10 @@ enum {
+  * bridge in response to a host trying to communicate via a locked bridge port
+  * with MAB enabled. Their purpose is to notify user space that a host requires
+  * authentication.
++ *
++ * NTF_EXT_EXT_VALIDATED flagged neighbor entries were externally validated by
++ * a user space control plane. The kernel will not remove or invalidate them,
++ * but it can probe them and notify user space when they become reachable.
+  */
+ 
+ struct nda_cacheinfo {
+diff --git a/net/core/neighbour.c b/net/core/neighbour.c
+index 4e8865fb6..6ab947f02 100644
+--- a/net/core/neighbour.c
++++ b/net/core/neighbour.c
+@@ -136,10 +136,11 @@ static void neigh_update_gc_list(struct neighbour *n)
+ 		goto out;
+ 
+ 	/* remove from the gc list if new state is permanent or if neighbor
+-	 * is externally learned; otherwise entry should be on the gc list
++	 * is externally learned / validated; otherwise entry should be on the gc
++	 * list
+ 	 */
+ 	exempt_from_gc = n->nud_state & NUD_PERMANENT ||
+-			 n->flags & NTF_EXT_LEARNED;
++			 n->flags & (NTF_EXT_LEARNED | NTF_EXT_VALIDATED);
+ 	on_gc_list = !list_empty(&n->gc_list);
+ 
+ 	if (exempt_from_gc && on_gc_list) {
+@@ -189,6 +190,7 @@ static void neigh_update_flags(struct neighbour *neigh, u32 flags, int *notify,
+ 	ndm_flags |= (flags & NEIGH_UPDATE_F_EXT_MH_PEER_SYNC) ?
+ 			     NTF_MH_PEER_SYNC :
+ 			     0;
++	ndm_flags |= (flags & NEIGH_UPDATE_F_EXT_VALIDATED) ? NTF_EXT_VALIDATED : 0;
+ 
+ 	if ((old_flags ^ ndm_flags) & NTF_EXT_LEARNED) {
+ 		if (ndm_flags & NTF_EXT_LEARNED)
+@@ -214,6 +216,14 @@ static void neigh_update_flags(struct neighbour *neigh, u32 flags, int *notify,
+ 			neigh->flags &= ~NTF_MH_PEER_SYNC;
+ 		*notify = 1;
+ 	}
++	if ((old_flags ^ ndm_flags) & NTF_EXT_VALIDATED) {
++		if (ndm_flags & NTF_EXT_VALIDATED)
++			neigh->flags |= NTF_EXT_VALIDATED;
++		else
++			neigh->flags &= ~NTF_EXT_VALIDATED;
++		*notify = 1;
++		*gc_update = true;
++	}
+ }
+ 
+ static bool neigh_del(struct neighbour *n, struct neighbour __rcu **np,
+@@ -407,7 +417,8 @@ static void neigh_flush_dev(struct neigh_table *tbl, struct net_device *dev,
+ 				np = &n->next;
+ 				continue;
+ 			}
+-			if (skip_perm && n->nud_state & NUD_PERMANENT) {
++			if (skip_perm && (n->nud_state & NUD_PERMANENT ||
++					  n->flags & NTF_EXT_VALIDATED)) {
+ 				np = &n->next;
+ 				continue;
+ 			}
+@@ -995,7 +1006,7 @@ static void neigh_periodic_work(struct work_struct *work)
+ 
+ 			state = n->nud_state;
+ 			if ((state & (NUD_PERMANENT | NUD_IN_TIMER)) ||
+-			    (n->flags & NTF_EXT_LEARNED)) {
++			    (n->flags & (NTF_EXT_LEARNED | NTF_EXT_VALIDATED))) {
+ 				write_unlock(&n->lock);
+ 				goto next_elt;
+ 			}
+@@ -1152,9 +1163,15 @@ static void neigh_timer_handler(struct timer_list *t)
+ 
+ 	if ((neigh->nud_state & (NUD_INCOMPLETE | NUD_PROBE)) &&
+ 	    atomic_read(&neigh->probes) >= neigh_max_probes(neigh)) {
+-		WRITE_ONCE(neigh->nud_state, NUD_FAILED);
++		if (neigh->nud_state == NUD_PROBE &&
++		    neigh->flags & NTF_EXT_VALIDATED) {
++			WRITE_ONCE(neigh->nud_state, NUD_STALE);
++			neigh->updated = jiffies;
++		} else {
++			WRITE_ONCE(neigh->nud_state, NUD_FAILED);
++			neigh_invalidate(neigh);
++		}
+ 		notify = 1;
+-		neigh_invalidate(neigh);
+ 		goto out;
+ 	}
+ 
+@@ -1302,6 +1319,8 @@ static void neigh_update_hhs(struct neighbour *neigh)
+ 				NTF_ROUTER flag.
+ 	NEIGH_UPDATE_F_ISROUTER	indicates if the neighbour is known as
+ 				a router.
++	NEIGH_UPDATE_F_EXT_VALIDATED means that the entry will not be removed
++				or invalidated.
+ 
+    Caller MUST hold reference count on the entry.
+  */
+@@ -2025,7 +2044,7 @@ static int neigh_add(struct sk_buff *skb, struct nlmsghdr *nlh,
+ 	if (ndm_flags & NTF_PROXY) {
+ 		struct pneigh_entry *pn;
+ 
+-		if (ndm_flags & NTF_MANAGED) {
++		if (ndm_flags & (NTF_MANAGED | NTF_EXT_VALIDATED)) {
+ 			NL_SET_ERR_MSG(extack, "Invalid NTF_* flag combination");
+ 			goto out;
+ 		}
+@@ -2055,7 +2074,7 @@ static int neigh_add(struct sk_buff *skb, struct nlmsghdr *nlh,
+ 	if (neigh == NULL) {
+ 		bool ndm_permanent  = ndm->ndm_state & NUD_PERMANENT;
+ 		bool exempt_from_gc = ndm_permanent ||
+-				      ndm_flags & NTF_EXT_LEARNED;
++				      ndm_flags & (NTF_EXT_LEARNED | NTF_EXT_VALIDATED);
+ 
+ 		if (!(nlh->nlmsg_flags & NLM_F_CREATE)) {
+ 			err = -ENOENT;
+@@ -2066,10 +2085,23 @@ static int neigh_add(struct sk_buff *skb, struct nlmsghdr *nlh,
+ 			err = -EINVAL;
+ 			goto out;
+ 		}
++		if (ndm_flags & NTF_EXT_VALIDATED) {
++			u8 state = ndm->ndm_state;
++
++			if (ndm_flags & (NTF_USE | NTF_MANAGED))
++				state = NUD_NONE;
++
++			if (!(state & NUD_VALID)) {
++				NL_SET_ERR_MSG(extack,
++					       "Cannot create externally validated neighbor with an invalid state");
++				err = -EINVAL;
++				goto out;
++			}
++		}
+ 
+ 		neigh = ___neigh_create(tbl, dst, dev,
+ 					ndm_flags &
+-					(NTF_EXT_LEARNED | NTF_MANAGED),
++					(NTF_EXT_LEARNED | NTF_MANAGED | NTF_EXT_VALIDATED),
+ 					exempt_from_gc, true);
+ 		if (IS_ERR(neigh)) {
+ 			err = PTR_ERR(neigh);
+@@ -2081,6 +2113,21 @@ static int neigh_add(struct sk_buff *skb, struct nlmsghdr *nlh,
+ 			neigh_release(neigh);
+ 			goto out;
+ 		}
++		if (ndm_flags & NTF_EXT_VALIDATED) {
++			u8 state = ndm->ndm_state;
++
++			if (ndm_flags & (NTF_USE | NTF_MANAGED))
++				state = READ_ONCE(neigh->nud_state) &
++					~NUD_PERMANENT;
++
++			if (!(state & NUD_VALID)) {
++				NL_SET_ERR_MSG(extack,
++					       "Cannot mark neighbor as externally validated with an invalid state");
++				err = -EINVAL;
++				neigh_release(neigh);
++				goto out;
++			}
++		}
+ 
+ 		if (!(nlh->nlmsg_flags & NLM_F_REPLACE))
+ 			flags &= ~(NEIGH_UPDATE_F_OVERRIDE |
+@@ -2099,6 +2146,8 @@ static int neigh_add(struct sk_buff *skb, struct nlmsghdr *nlh,
+ 		flags |= NEIGH_UPDATE_F_USE;
+ 	if (ndm_flags & NTF_MH_PEER_SYNC)
+ 		flags |= NEIGH_UPDATE_F_EXT_MH_PEER_SYNC;
++	if (ndm_flags & NTF_EXT_VALIDATED)
++		flags |= NEIGH_UPDATE_F_EXT_VALIDATED;
+ 
+ 	err = __neigh_update(neigh, lladdr, ndm->ndm_state, flags,
+ 			     NETLINK_CB(skb).portid, extack);
+-- 
+2.43.0
+
